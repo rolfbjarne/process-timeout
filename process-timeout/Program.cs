@@ -15,6 +15,7 @@ namespace processtimeout
         static string prefix;
         static bool countdown;
         static TimeSpan timeout = TimeSpan.FromMinutes(10);
+        static TimeSpan output_timeout = TimeSpan.FromMinutes (2);
         static DateTime startTime;
 
         static object lastWriteLock = new object();
@@ -26,6 +27,7 @@ namespace processtimeout
             {
                 { "prefix=", (v) => prefix = v },
                 { "timeout=", (v) => timeout = TimeSpan.FromMinutes (int.Parse (v)) },
+                { "output-timeout=", (v) => output_timeout = TimeSpan.FromMinutes (int.Parse (v)) },
                 { "countdown", (v) => countdown = true },
                 { "tick-uptime", (v) => TickUpdate () },
             };
@@ -118,6 +120,27 @@ namespace processtimeout
 
             var pid = process.Id;
 
+            lastWrite = DateTime.UtcNow;
+            var outputChecker = new Thread (() => {
+                while (true) {
+                    Thread.Sleep (1000);
+                    TimeSpan diff;
+                    lock (lastWriteLock) {
+                        diff = DateTime.UtcNow - lastWrite;
+                    }
+                    if (diff > output_timeout) {
+                        var offspring = ProcessManager.GetChildProcessIdsInternal(Console.Error, pid);
+                        Console.WriteLine($"Execution timed out due to no output in {diff}. Will kill the following pids: {string.Join(", ", offspring.Select(v => v.ToString()))}");
+                        ProcessManager.Kill(Console.Error, offspring);
+                        return;
+                    } else if (diff.TotalSeconds > 15) {
+                        Console.WriteLine ($" {prefix}Diff: {diff} Left: {output_timeout - diff}");
+                    }
+                }
+            });
+            outputChecker.IsBackground = true;
+            outputChecker.Start ();
+
             static void writeLine (string line)
             {
                 lock (lastWriteLock)
@@ -130,13 +153,15 @@ namespace processtimeout
 
             if (process.WaitForExit((int)timeout.TotalMilliseconds))
             {
-                Console.WriteLine("Execution completed successfully");
+                Console.WriteLine($"Execution completed with exit code {process.ExitCode}");
                 return process.ExitCode;
             }
 
-            var offspring = ProcessManager.GetChildProcessIdsInternal(Console.Error, pid);
-            Console.WriteLine($"Execution timed out. Will kill the following pids: {string.Join(", ", offspring.Select(v => v.ToString()))}");
-            ProcessManager.Kill(Console.Error, offspring);
+            {
+                var offspring = ProcessManager.GetChildProcessIdsInternal(Console.Error, pid);
+                Console.WriteLine($"Execution timed out. Will kill the following pids: {string.Join(", ", offspring.Select(v => v.ToString()))}");
+                ProcessManager.Kill(Console.Error, offspring);
+            }
             return 1;
         }
     }
